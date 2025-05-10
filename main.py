@@ -187,45 +187,24 @@ async def periodic_check():
 
     for order in orders:
         message_text, image_urls, items_info = format_order_message(order)
-        product_title = order.get('id')
-        # Проверяем, были ли уже отправлены уведомления для этих продуктов
-        new_items = []
-        for item in items_info:
 
-            if product_title not in PRODUCT_IDS:  # Если продукт новый
+        # Проверяем, были ли уже отправлены уведомления для каждой позиции заказа
+        new_items = []
+        for idx, item in enumerate(items_info):
+            # Формируем уникальный ключ для каждого товара:
+            unique_key = f"{order.get('id')}_{item.get('skuCharValue', idx)}"
+            if unique_key not in PRODUCT_IDS:  # Если товар новый
                 new_items.append(item)
-                PRODUCT_IDS.add(product_title)  # Добавляем его в список
+                PRODUCT_IDS.add(unique_key)  # Добавляем его в список отправленных уведомлений
 
         if new_items:
-            deliver_until = order.get('deliverUntil', '')
-            formatted_date = 'Не указано'
-            items_info = []
-
-            if deliver_until:
-                if isinstance(deliver_until, str):
-                    try:
-                        deliver_date = datetime.fromisoformat(deliver_until.replace('Z', '+00:00'))
-                        formatted_date = deliver_date.strftime('%d.%m.%Y')
-                    except ValueError:
-                        logger.error(f"Ошибка при обработке даты {deliver_until}")
-                elif isinstance(deliver_until, int):
-                    try:
-                        deliver_date = datetime.fromtimestamp(deliver_until / 1000)
-                        formatted_date = deliver_date.strftime('%d.%m.%Y')
-                    except:
-                        try:
-                            deliver_date = datetime.fromtimestamp(deliver_until)
-                            formatted_date = deliver_date.strftime('%d.%m.%Y')
-                        except:
-                            logger.error(f"Не удалось обработать timestamp {deliver_until}")
-
+            # Формируем новое сообщение только для новых товаров
             new_message = f"📦 *Новый заказ №{order.get('id')}*\n\n"
-            for idx, item in enumerate(new_items, 1):
-                new_message += f"{idx}. *{item['title']}*\n   Количество: {item['amount']} шт.\n"
-            new_message += f"\n🚚 *Доставка до:* {formatted_date}\n"
+            for num, item in enumerate(new_items, 1):
+                new_message += f"{num}. *{item['title']}*\n   Количество: {item['amount']} шт.\n"
+            new_message += f"\n🚚 *Доставка до:* {datetime.now().strftime('%d.%m.%Y')}\n"
             new_message += f"📊 *Общее количество товаров:* {len(new_items)} шт.\n"
             new_message += f"🆔 *ID заказа:* {order.get('id')}"
-
 
             # Отправляем уведомление
             valid_image_urls = [item['image_url'] for item in new_items if item['image_url']]
@@ -247,10 +226,6 @@ async def manual_daily_report(message: types.Message):
     # await message.answer("✅ Ежедневный отчет успешно отправлен!")
 
 
-import logging
-from datetime import datetime, date
-
-logger = logging.getLogger(__name__)
 
 async def daily_report():
     """Ежедневный отчет (автоматический или ручной)"""
@@ -353,7 +328,6 @@ async def daily_report():
         )
 
 
-
 def sanitize_text(text):
     """Очищает текст от потенциально проблемных символов"""
     if not text:
@@ -364,20 +338,21 @@ def sanitize_text(text):
         text = text.replace(char, ' ')
     return text
 
+
 # Функция для разделения длинных сообщений
 async def split_and_send_message(chat_id, message, max_length=4000):
     """Разделяет длинное сообщение на части и отправляет их последовательно"""
     import asyncio
-    
+
     if len(message) <= max_length:
         # ВАЖНО: явно указываем parse_mode=None
         await bot.send_message(chat_id, text=message, parse_mode=None)
         return
-    
+
     parts = []
     current_part = ""
     paragraphs = message.split("\n\n")
-    
+
     for paragraph in paragraphs:
         # Если параграф сам по себе больше максимальной длины
         if len(paragraph) > max_length:
@@ -400,10 +375,10 @@ async def split_and_send_message(chat_id, message, max_length=4000):
             else:
                 parts.append(current_part)
                 current_part = paragraph
-    
+
     if current_part:
         parts.append(current_part)
-    
+
     # Отправляем каждую часть
     for i, part in enumerate(parts):
         try:
@@ -412,8 +387,8 @@ async def split_and_send_message(chat_id, message, max_length=4000):
             # Небольшая задержка между сообщениями
             await asyncio.sleep(0.5)
         except Exception as e:
-            logger.error(f"Ошибка при отправке части {i+1}: {e}")
-            logger.debug(f"Проблемная часть сообщения [{i+1}]: {part[:50]}...")
+            logger.error(f"Ошибка при отправке части {i + 1}: {e}")
+            logger.debug(f"Проблемная часть сообщения [{i + 1}]: {part[:50]}...")
 
 
 async def main():
