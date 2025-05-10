@@ -8,6 +8,7 @@ from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InputMediaPhoto
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiogram.utils.exceptions import FloodWait
 from pytz import timezone
 
 # Настройка логирования
@@ -206,9 +207,16 @@ async def periodic_check():
             new_message += f"📊 *Общее количество товаров:* {len(new_items)} шт.\n"
             new_message += f"🆔 *ID заказа:* {order.get('id')}"
 
-            # Отправляем уведомление
+            # Отправляем уведомление с обработкой ограничения скорости
             valid_image_urls = [item['image_url'] for item in new_items if item['image_url']]
-            await send_telegram_notification(CHAT_ID, new_message, valid_image_urls)
+            try:
+                await send_telegram_notification(CHAT_ID, new_message, valid_image_urls)
+            except FloodWait as e:
+                logger.warning(f"Flood limit reached: sleeping for {e.timeout} seconds")
+                await asyncio.sleep(e.timeout)
+                await send_telegram_notification(CHAT_ID, new_message, valid_image_urls)
+            # Небольшая пауза между отправками, чтобы избежать контроля потока
+            await asyncio.sleep(1)
 
 
 async def clear_product_ids():
