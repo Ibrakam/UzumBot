@@ -1,17 +1,14 @@
 import asyncio
 import logging
 import requests
-from datetime import datetime, time
+from datetime import datetime, date, timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import StatesGroup, State
+
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InputMediaPhoto
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
-from sqlalchemy import Column, String, Time, DateTime, Integer, create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -19,87 +16,19 @@ logger = logging.getLogger(__name__)
 
 # Константы
 API_KEY = "mmldJYh2h33pboUakTFsohCOa1VLR5KCP4OBW0j5+y0="
-TOKEN = '7279266289:AAEZhEkpNREbkFUp6DELAlWoKXEjFvc8x4Y'
+TOKEN = '7679981523:AAGF18FAUE5not4VIxR-e5gKOgwvYkK102Y'
 CHECK_INTERVAL = 60
 PRODUCT_IDS = set()
 
-# Инициализация бота и диспетчера
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Глобальная переменная для хранения chat_id
 CHAT_ID = None
 
-Base = declarative_base()
 
-
-class UserConfig(Base):
-    """
-    Модель для хранения настроек каждого пользователя:
-    - chat_id: уникальный идентификатор чата Telegram
-    - api_key: API-ключ для доступа к внешнему API
-    - report_time: время отправки ежедневного отчёта
-    - updated_at: время последнего обновления записи
-    """
-    __tablename__ = 'user_config'
-
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(String(50), unique=True, nullable=False)
-    api_key = Column(String(255), nullable=False)
-    report_time = Column(Time, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    def __repr__(self):
-        return f"<UserConfig(chat_id='{self.chat_id}', api_key='{self.api_key}', report_time='{self.report_time}')>"
-
-
-# Настройка подключения к БД (здесь используется SQLite)
-engine = create_engine('sqlite:///bot_config.db', echo=False)
-SessionLocal = sessionmaker(bind=engine)
-Base.metadata.create_all(engine)
-
-
-def get_session():
-    """Возвращает сессию для работы с БД."""
-    return SessionLocal()
-
-
-def get_user_config(chat_id: str):
-    """Извлекает конфигурацию пользователя по chat_id."""
-    session = get_session()
-    config = session.query(UserConfig).filter(UserConfig.chat_id == chat_id).first()
-    session.close()
-    return config
-
-
-def save_user_config(chat_id: str, api_key: str, report_time: time):
-    """Создает или обновляет конфигурацию пользователя в БД."""
-    session = get_session()
-    config = session.query(UserConfig).filter(UserConfig.chat_id == chat_id).first()
-    if config:
-        config.api_key = api_key
-        config.report_time = report_time
-    else:
-        config = UserConfig(chat_id=chat_id, api_key=api_key, report_time=report_time)
-        session.add(config)
-    session.commit()
-    session.close()
-
-
-# ---------------------------- FSM: Сбор настроек от пользователя ----------------------------
-
-class ConfigStates(StatesGroup):
-    waiting_for_api_key = State()
-    waiting_for_report_time = State()
-
-
-# ---------------------------- Функции работы с API и форматирования сообщений ----------------------------
-
-def get_orders(api_key: str):
-    """
-    Получает заказы через внешний API.
-    Параметры запроса и URL задаются статически (пример для демонстрации).
-    """
+def get_orders(api_key):
+    """Получение заказов через API"""
     url = "https://api-seller.uzum.uz/api/seller-openapi/v1/fbs/orders"
     params = {"shopIds": "60348", "status": "PACKING"}
     headers = {"Authorization": f"{api_key}"}
@@ -114,10 +43,7 @@ def get_orders(api_key: str):
 
 
 def format_order_message(order):
-    """
-    Формирует текстовое сообщение для уведомления о заказе.
-    Также возвращает список валидных URL изображений и подробную информацию по товарам.
-    """
+    """Формирует сообщение для отправки в Telegram на основе данных заказа"""
     order_id = order.get('id', 'Нет данных')
     deliver_until = order.get('deliverUntil', '')
     formatted_date = 'Не указано'
@@ -133,11 +59,11 @@ def format_order_message(order):
             try:
                 deliver_date = datetime.fromtimestamp(deliver_until / 1000)
                 formatted_date = deliver_date.strftime('%d.%m.%Y')
-            except Exception:
+            except:
                 try:
                     deliver_date = datetime.fromtimestamp(deliver_until)
                     formatted_date = deliver_date.strftime('%d.%m.%Y')
-                except Exception:
+                except:
                     logger.error(f"Не удалось обработать timestamp {deliver_until}")
 
     items_info = []
@@ -186,19 +112,16 @@ def format_order_message(order):
 
 
 async def send_telegram_notification(chat_id, message_text, image_urls=None):
-    """
-    Отправляет уведомление пользователю.
-    Если присутствуют изображения – отправляет как фото или группу фотографий, иначе как текст.
-    """
+    """Отправляет уведомление в Telegram с группировкой изображений"""
     try:
         if image_urls and len(image_urls) > 0:
             if len(image_urls) == 1:
                 await bot.send_photo(chat_id, photo=image_urls[0], caption=message_text, parse_mode='Markdown')
             else:
-                media_group = [types.InputMediaPhoto(media=image_urls[0], caption=message_text, parse_mode='Markdown')]
+                media_group = [InputMediaPhoto(media=image_urls[0], caption=message_text, parse_mode='Markdown')]
                 for url in image_urls[1:]:
                     if url:
-                        media_group.append(types.InputMediaPhoto(media=url))
+                        media_group.append(InputMediaPhoto(media=url))
                 await bot.send_media_group(chat_id=chat_id, media=media_group)
         else:
             await bot.send_message(chat_id, text=message_text, parse_mode='Markdown')
@@ -214,85 +137,19 @@ async def send_telegram_notification(chat_id, message_text, image_urls=None):
             return False
 
 
-async def clear_product_ids():
-    """Очищает список ID продуктов каждые 48 часов"""
-    global PRODUCT_IDS
-    logger.info("Очистка списка ID продуктов...")
-    PRODUCT_IDS.clear()
-
-
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    """
-    Обработчик команды /start.
-    Если у пользователя уже есть настройки, выводит справку по командам,
-    иначе предлагает пройти настройку через команду /config.
-    """
-    chat_id = str(message.chat.id)
-    config = get_user_config(chat_id)
-    if config:
-        await message.answer("Вы уже настроили бота. Доступные команды:\n"
-                             "/config — обновить настройки\n"
-                             "/check — проверить заказы\n"
-                             "/report — получить отчет")
-    else:
-        await message.answer("Привет! Добро пожаловать в бота.\n"
-                             "Для начала настройте API ключ и время ежедневного отчета командой /config")
-
-
-@dp.message(Command("config"))
-async def cmd_config(message: types.Message,state: FSMContext):
-    """
-    Обработчик команды /config.
-    Запускает процесс настройки, запрашивая сначала API ключ, затем время отчета.
-    """
-    await message.answer("Введите ваш API ключ:")
-    await state.set_state(ConfigStates.waiting_for_api_key)
-
-
-@dp.message(ConfigStates.waiting_for_api_key)
-async def process_api_key(message: types.Message, state: FSMContext):
-    """
-    Получает API ключ от пользователя и переходит к запросу времени отчета.
-    """
-    api_key = message.text.strip()
-    await state.update_data(api_key=api_key)
-    await message.answer("Введите время ежедневного отчета в формате ЧЧ:ММ (например, 16:00):")
-    await state.set_state(ConfigStates.waiting_for_report_time)
-
-
-@dp.message(ConfigStates.waiting_for_report_time)
-async def process_report_time(message: types.Message, state: FSMContext):
-    """
-    Обрабатывает время отчета, сохраняет настройки в БД и завершает FSM.
-    """
-    time_str = message.text.strip()
-    try:
-        report_time = datetime.strptime(time_str, "%H:%M").time()
-    except ValueError:
-        await message.answer("Неверный формат времени. Попробуйте еще раз (например, 16:00):")
-        return
-    data = await state.get_data()
-    api_key = data.get('api_key')
-    chat_id = str(message.chat.id)
-    save_user_config(chat_id, api_key, report_time)
-    await message.answer(f"Настройки сохранены!\nAPI ключ: {api_key}\nВремя отчета: {report_time.strftime('%H:%M')}")
-    await state.clear()
+async def start_command(message: types.Message):
+    """Обработчик команды /start для установки chat_id"""
+    global CHAT_ID
+    CHAT_ID = message.chat.id
+    await message.answer(
+        "Бот запущен! Теперь я буду отправлять уведомления сюда.")
 
 
 @dp.message(Command("check"))
-async def cmd_check(message: types.Message):
-    """
-    Обработчик команды /check.
-    Проверяет заказы через API с использованием сохраненного API ключа и отправляет уведомления.
-    """
-    chat_id = str(message.chat.id)
-    config = get_user_config(chat_id)
-    if not config:
-        await message.answer("Настройки не найдены. Настройте бота через команду /config")
-        return
-
-    orders_data = get_orders(config.api_key)
+async def check_new_orders_command(message: types.Message):
+    """Обработчик команды /check"""
+    orders_data = get_orders(API_KEY)
     if not orders_data:
         await message.answer("Не удалось получить данные о заказах")
         return
@@ -303,116 +160,260 @@ async def cmd_check(message: types.Message):
         return
 
     for order in orders:
-        message_text, image_urls, _ = format_order_message(order)
-        success = await send_telegram_notification(chat_id, message_text, image_urls)
+        message_text, image_urls, items_info = format_order_message(order)
+        success = await send_telegram_notification(message.chat.id, message_text, image_urls)
         if success:
             await message.answer(f"✅ Уведомление о заказе {order.get('id')} успешно отправлено")
         else:
             await message.answer(f"❌ Не удалось отправить уведомление о заказе {order.get('id')}")
 
 
-@dp.message(Command("report"))
-async def cmd_report(message: types.Message):
-    """
-    Обработчик команды /report.
-    Отправляет ежедневный отчет для пользователя.
-    """
-    chat_id = str(message.chat.id)
-    config = get_user_config(chat_id)
-    if not config:
-        await message.answer("Настройки не найдены. Настройте бота через команду /config")
+async def periodic_check():
+    """Периодическая проверка заказов"""
+    global CHAT_ID, PRODUCT_IDS
+    if CHAT_ID is None:
+        logger.warning("CHAT_ID не установлен, пропускаю автоматическую проверку.")
         return
 
-    await send_daily_report(chat_id, config.api_key)
-
-
-# ---------------------------- Ежедневный отчет и периодические задачи ----------------------------
-
-async def send_daily_report(chat_id: str, api_key: str):
-    """
-    Формирует и отправляет ежедневный отчет пользователю.
-    """
-    orders_data = get_orders(api_key)
+    logger.info("Выполняется автоматическая проверка заказов...")
+    orders_data = get_orders(API_KEY)
     if not orders_data:
-        await bot.send_message(chat_id, "Не удалось получить данные о заказах для отчета.")
+        await bot.send_message(CHAT_ID, "Не удалось получить данные о заказах")
         return
 
     orders = orders_data.get('payload', {}).get('orders', [])
-    total_orders = len(orders)
-    total_items = 0
+    if not orders:
+        return
 
     for order in orders:
-        # Получаем информацию по заказу
-        _, _, items_info = format_order_message(order)
+        message_text, image_urls, items_info = format_order_message(order)
+        product_title = order.get('id')
+        # Проверяем, были ли уже отправлены уведомления для этих продуктов
         new_items = []
         for item in items_info:
-            product_key = item['title']  # здесь используется название товара как идентификатор
-            if product_key not in PRODUCT_IDS:
+
+            if product_title not in PRODUCT_IDS:  # Если продукт новый
                 new_items.append(item)
-                PRODUCT_IDS.add(product_key)
+                PRODUCT_IDS.add(product_title)  # Добавляем его в список
 
         if new_items:
+            deliver_until = order.get('deliverUntil', '')
+            formatted_date = 'Не указано'
+            items_info = []
+
+            if deliver_until:
+                if isinstance(deliver_until, str):
+                    try:
+                        deliver_date = datetime.fromisoformat(deliver_until.replace('Z', '+00:00'))
+                        formatted_date = deliver_date.strftime('%d.%m.%Y')
+                    except ValueError:
+                        logger.error(f"Ошибка при обработке даты {deliver_until}")
+                elif isinstance(deliver_until, int):
+                    try:
+                        deliver_date = datetime.fromtimestamp(deliver_until / 1000)
+                        formatted_date = deliver_date.strftime('%d.%m.%Y')
+                    except:
+                        try:
+                            deliver_date = datetime.fromtimestamp(deliver_until)
+                            formatted_date = deliver_date.strftime('%d.%m.%Y')
+                        except:
+                            logger.error(f"Не удалось обработать timestamp {deliver_until}")
+
             new_message = f"📦 *Новый заказ №{order.get('id')}*\n\n"
             for idx, item in enumerate(new_items, 1):
                 new_message += f"{idx}. *{item['title']}*\n   Количество: {item['amount']} шт.\n"
-            new_message += f"\n🚚 *Доставка до:* {datetime.now().strftime('%d.%m.%Y')}\n"
+            new_message += f"\n🚚 *Доставка до:* {formatted_date}\n"
             new_message += f"📊 *Общее количество товаров:* {len(new_items)} шт.\n"
             new_message += f"🆔 *ID заказа:* {order.get('id')}"
+
+
+            # Отправляем уведомление
             valid_image_urls = [item['image_url'] for item in new_items if item['image_url']]
-            await send_telegram_notification(chat_id, new_message, valid_image_urls)
+            await send_telegram_notification(CHAT_ID, new_message, valid_image_urls)
 
 
-async def periodic_check():
-    """
-    Периодическая проверка заказов для всех пользователей.
-    Каждые 60 секунд происходит запрос к API и отправка уведомлений, если есть новые заказы.
-    """
-    logger.info("Запуск периодической проверки заказов для всех пользователей...")
-    session = get_session()
-    configs = session.query(UserConfig).all()
-    session.close()
-    for config in configs:
-        orders_data = get_orders(config.api_key)
-        if not orders_data:
-            await bot.send_message(config.chat_id, "Не удалось получить данные о заказах")
+async def clear_product_ids():
+    """Очищает список ID продуктов каждые 48 часов"""
+    global PRODUCT_IDS
+    logger.info("Очистка списка ID продуктов...")
+    PRODUCT_IDS.clear()
+
+
+@dp.message(Command("report"))
+async def manual_daily_report(message: types.Message):
+    """Обработчик команды /report для ручного получения ежедневного отчета"""
+    logger.info("Получена команда /report для ручного отчета.")
+    await daily_report()
+    # await message.answer("✅ Ежедневный отчет успешно отправлен!")
+
+
+import logging
+from datetime import datetime, date
+
+logger = logging.getLogger(__name__)
+
+async def daily_report():
+    """Ежедневный отчет (автоматический или ручной)"""
+    global CHAT_ID
+    if CHAT_ID is None:
+        logger.warning("CHAT_ID не установлен, пропускаю отправку ежедневного отчета.")
+        return
+
+    logger.info("Формирование ежедневного отчета...")
+    orders_data = get_orders(API_KEY)
+    if not orders_data:
+        await bot.send_message(
+            CHAT_ID,
+            "Не удалось получить данные о заказах для ежедневного отчета.",
+            parse_mode=None
+        )
+        return
+
+    orders = orders_data.get('payload', {}).get('orders', [])
+    today = date.today()
+    today_orders = []
+
+    for order in orders:
+        created_at = order.get('dateCreated')
+        if not created_at:
+            logger.warning("Дата заказа отсутствует для заказа.")
             continue
-        orders = orders_data.get('payload', {}).get('orders', [])
-        if not orders:
-            continue
-        for order in orders:
-            # Получаем информацию по заказу
-            _, _, items_info = format_order_message(order)
-            new_items = []
-            for item in items_info:
-                product_key = order.get('id')  # здесь используется название товара как идентификатор
-                if product_key not in PRODUCT_IDS:
-                    new_items.append(item)
-                    PRODUCT_IDS.add(product_key)
 
-            if new_items:
-                new_message = f"📦 *Новый заказ №{order.get('id')}*\n\n"
-                for idx, item in enumerate(new_items, 1):
-                    new_message += f"{idx}. *{item['title']}*\n   Количество: {item['amount']} шт.\n"
-                new_message += f"\n🚚 *Доставка до:* {datetime.now().strftime('%d.%m.%Y')}\n"
-                new_message += f"📊 *Общее количество товаров:* {len(new_items)} шт.\n"
-                new_message += f"🆔 *ID заказа:* {order.get('id')}"
-                valid_image_urls = [item['image_url'] for item in new_items if item['image_url']]
-                await send_telegram_notification(config.chat_id, new_message, valid_image_urls)
+        order_date = None
+        # 1) Числовой таймстамп (ms)
+        if isinstance(created_at, (int, float)) or (isinstance(created_at, str) and created_at.isdigit()):
+            try:
+                ts = int(created_at) / 1000
+                # UTC-время без лишних импортов
+                order_date = datetime.utcfromtimestamp(ts).date()
+                # Если хотите местное время, используйте:
+                # order_date = datetime.fromtimestamp(ts).date()
+            except Exception as e:
+                logger.warning(f"Не удалось обработать таймстамп {created_at}: {e}")
+
+        # 2) ISO-строка
+        else:
+            try:
+                s = str(created_at)
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                order_date = datetime.fromisoformat(s).date()
+            except Exception as e:
+                logger.warning(f"Не удалось обработать дату заказа {created_at}: {e}")
+
+        if order_date == today:
+            today_orders.append(order)
+
+    total_orders = len(today_orders)
+    total_items = 0
+    detailed_orders = []
+
+    for order in today_orders:
+        order_id = order.get('id', 'Нет данных')
+        items_info = []
+        for item in order.get('orderItems', []):
+            title = item.get('title') or item.get('productTitle') or 'Неизвестный товар'
+            title = sanitize_text(title)
+            amount = item.get('amount', 0)
+            total_items += amount
+            items_info.append(f"   - {title} ({amount} шт.)")
+        if items_info:
+            detailed_orders.append(f"📦 Заказ №{order_id}:\n" + "\n".join(items_info))
+
+    report_message = (
+        f"📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ\n\n"
+        f"📦 Всего заказов за сегодня: {total_orders}\n"
+        f"🛍️ Всего товаров: {total_items}\n\n"
+    )
+    if detailed_orders:
+        report_message += "📋 СПИСОК ЗАКАЗОВ:\n" + "\n\n".join(detailed_orders)
+    else:
+        report_message += "⚠️ Нет данных о заказах за сегодня."
+
+    logger.debug(f"Длина сообщения: {len(report_message)}")
+
+    try:
+        if len(report_message) > 4096:
+            logger.info("Отчет слишком длинный, отправляю его частями...")
+            await split_and_send_message(CHAT_ID, report_message)
+        else:
+            await bot.send_message(
+                CHAT_ID,
+                text=report_message,
+                parse_mode=None
+            )
+        logger.info("Ежедневный отчет успешно отправлен.")
+    except Exception as e:
+        logger.error(f"Ошибка при отправке отчета: {e}")
+        simple_message = f"📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ: {total_orders} заказов, {total_items} товаров."
+        await bot.send_message(
+            CHAT_ID,
+            text=simple_message,
+            parse_mode=None
+        )
 
 
-async def schedule_daily_reports():
-    """
-    Проверяет каждую минуту, совпадает ли время отправки отчета с настроенным временем для каждого пользователя,
-    и отправляет отчет, если время совпало.
-    """
-    logger.info("Проверка времени для отправки ежедневных отчетов...")
-    session = get_session()
-    configs = session.query(UserConfig).all()
-    session.close()
-    now = datetime.now(timezone('Asia/Tashkent'))
-    for config in configs:
-        if now.time().strftime("%H:%M") == config.report_time.strftime("%H:%M"):
-            await send_daily_report(config.chat_id, config.api_key)
+
+def sanitize_text(text):
+    """Очищает текст от потенциально проблемных символов"""
+    if not text:
+        return ""
+    # Заменяем символы, которые могут быть интерпретированы как разметка
+    problematic_chars = ['*', '_', '`', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in problematic_chars:
+        text = text.replace(char, ' ')
+    return text
+
+# Функция для разделения длинных сообщений
+async def split_and_send_message(chat_id, message, max_length=4000):
+    """Разделяет длинное сообщение на части и отправляет их последовательно"""
+    import asyncio
+    
+    if len(message) <= max_length:
+        # ВАЖНО: явно указываем parse_mode=None
+        await bot.send_message(chat_id, text=message, parse_mode=None)
+        return
+    
+    parts = []
+    current_part = ""
+    paragraphs = message.split("\n\n")
+    
+    for paragraph in paragraphs:
+        # Если параграф сам по себе больше максимальной длины
+        if len(paragraph) > max_length:
+            # Разделяем по строкам
+            lines = paragraph.split("\n")
+            for line in lines:
+                if len(current_part) + len(line) + 1 <= max_length:
+                    if current_part:
+                        current_part += "\n"
+                    current_part += line
+                else:
+                    parts.append(current_part)
+                    current_part = line
+        else:
+            # Добавляем параграф, если помещается
+            if len(current_part) + len(paragraph) + 2 <= max_length:
+                if current_part:
+                    current_part += "\n\n"
+                current_part += paragraph
+            else:
+                parts.append(current_part)
+                current_part = paragraph
+    
+    if current_part:
+        parts.append(current_part)
+    
+    # Отправляем каждую часть
+    for i, part in enumerate(parts):
+        try:
+            # ВАЖНО: явно указываем parse_mode=None
+            await bot.send_message(chat_id, text=part, parse_mode=None)
+            # Небольшая задержка между сообщениями
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке части {i+1}: {e}")
+            logger.debug(f"Проблемная часть сообщения [{i+1}]: {part[:50]}...")
 
 
 async def main():
@@ -431,7 +432,7 @@ async def main():
         hours=48  # Очистка каждые 48 часов
     )
     scheduler.add_job(
-        schedule_daily_reports,
+        daily_report,
         "cron",
         hour=16, minute=0  # Ежедневно в 16:00 по ташкентскому времени
     )

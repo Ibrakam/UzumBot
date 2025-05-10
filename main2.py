@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Константы
 API_KEY = "mmldJYh2h33pboUakTFsohCOa1VLR5KCP4OBW0j5+y0="
-TOKEN = '7279266289:AAEZhEkpNREbkFUp6DELAlWoKXEjFvc8x4Y'
+TOKEN = '7679981523:AAGF18FAUE5not4VIxR-e5gKOgwvYkK102Y'
 CHECK_INTERVAL = 60
 PRODUCT_IDS = set()
 
@@ -24,6 +24,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Глобальная переменная для хранения chat_id
+#CHAT_ID = -1002476227518
 CHAT_ID = None
 
 
@@ -145,7 +146,6 @@ async def start_command(message: types.Message):
     await message.answer(
         "Бот запущен! Теперь я буду отправлять уведомления сюда.")
 
-
 @dp.message(Command("check"))
 async def check_new_orders_command(message: types.Message):
     """Обработчик команды /check"""
@@ -167,7 +167,6 @@ async def check_new_orders_command(message: types.Message):
         else:
             await message.answer(f"❌ Не удалось отправить уведомление о заказе {order.get('id')}")
 
-
 async def periodic_check():
     """Периодическая проверка заказов"""
     global CHAT_ID, PRODUCT_IDS
@@ -188,19 +187,20 @@ async def periodic_check():
     for order in orders:
         message_text, image_urls, items_info = format_order_message(order)
 
-        # Проверяем, были ли уже отправлены уведомления для этих продуктов
+        # Проверяем, были ли уже отправлены уведомления для каждой позиции заказа
         new_items = []
-        for item in items_info:
-            product_title = item['title']
-            if product_title not in PRODUCT_IDS:  # Если продукт новый
+        for idx, item in enumerate(items_info):
+            # Формируем уникальный ключ для каждого товара:
+            unique_key = f"{order.get('id')}_{item.get('skuCharValue', idx)}"
+            if unique_key not in PRODUCT_IDS:  # Если товар новый
                 new_items.append(item)
-                PRODUCT_IDS.add(product_title)  # Добавляем его в список
+                PRODUCT_IDS.add(unique_key)  # Добавляем его в список отправленных уведомлений
 
         if new_items:
-            # Формируем новое сообщение только для новых продуктов
+            # Формируем новое сообщение только для новых товаров
             new_message = f"📦 *Новый заказ №{order.get('id')}*\n\n"
-            for idx, item in enumerate(new_items, 1):
-                new_message += f"{idx}. *{item['title']}*\n   Количество: {item['amount']} шт.\n"
+            for num, item in enumerate(new_items, 1):
+                new_message += f"{num}. *{item['title']}*\n   Количество: {item['amount']} шт.\n"
             new_message += f"\n🚚 *Доставка до:* {datetime.now().strftime('%d.%m.%Y')}\n"
             new_message += f"📊 *Общее количество товаров:* {len(new_items)} шт.\n"
             new_message += f"🆔 *ID заказа:* {order.get('id')}"
@@ -208,7 +208,6 @@ async def periodic_check():
             # Отправляем уведомление
             valid_image_urls = [item['image_url'] for item in new_items if item['image_url']]
             await send_telegram_notification(CHAT_ID, new_message, valid_image_urls)
-
 
 async def clear_product_ids():
     """Очищает список ID продуктов каждые 48 часов"""
