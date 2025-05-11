@@ -8,7 +8,6 @@ from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InputMediaPhoto
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from aiogram.utils.exceptions import FloodWait
 from pytz import timezone
 
 # Настройка логирования
@@ -69,6 +68,9 @@ def format_order_message(order):
 
     items_info = []
     total_amount = 0
+    valid_image_urls = []  # Создаем список для URL изображений здесь
+
+    # Перебираем все товары в заказе
     for item in order.get('orderItems', []):
         product_title = item.get('title', 'Неизвестный товар') or item.get('productTitle', 'Неизвестный товар')
         sku_char_value = item.get('skuCharValue', '')
@@ -78,28 +80,44 @@ def format_order_message(order):
         total_amount += amount
 
         image_url = None
-        product_image = item.get('photo', {})
-        if 'photo' in product_image:
-            photo_data = product_image.get('photo', {})
-            try:
-                if photo_data and '800' in photo_data and 'high' in photo_data['800']:
-                    image_url = photo_data['800']['high']
-            except (KeyError, TypeError) as e:
-                logger.error(f"Ошибка при обработке фото: {e}")
+        # Обрабатываем объект photo
+        if item.get('photo') and isinstance(item.get('photo'), dict):
+            product_image = item.get('photo')
+            if 'photo' in product_image and isinstance(product_image.get('photo'), dict):
+                photo_data = product_image.get('photo')
+                # Проверяем наличие ключей в определенном порядке (от большего к меньшему разрешению)
+                for size in ['800', '720', '540', '480', '240']:
+                    if size in photo_data and 'high' in photo_data[size]:
+                        image_url = photo_data[size]['high']
+                        logger.info(f"Найдено изображение: {image_url}")
+                        break
 
+        # Если изображение не найдено в photo, ищем в productImage
         if not image_url and item.get('productImage'):
             try:
-                product_image = item.get('productImage', {})
+                product_image = item.get('productImage')
                 if 'photo' in product_image:
-                    photo_data = product_image.get('photo', {})
+                    photo_data = product_image.get('photo')
                     for size in ['800', '720', '540', '480', '240']:
                         if size in photo_data and 'high' in photo_data[size]:
                             image_url = photo_data[size]['high']
+                            logger.info(f"Найдено изображение в productImage: {image_url}")
                             break
             except (KeyError, TypeError) as e:
                 logger.error(f"Ошибка при обработке productImage: {e}")
 
-        items_info.append({'title': product_title, 'amount': amount, 'image_url': image_url})
+        if image_url:
+            valid_image_urls.append(image_url)
+
+        items_info.append({
+            'title': product_title,
+            'amount': amount,
+            'image_url': image_url,
+            'skuCharValue': sku_char_value
+        })
+
+    # Логируем количество товаров и изображений
+    logger.info(f"Заказ {order_id}: всего товаров: {len(items_info)}, найдено изображений: {len(valid_image_urls)}")
 
     message = f"📦 *Новый заказ №{order_id}*\n\n"
     for idx, item in enumerate(items_info, 1):
@@ -108,30 +126,58 @@ def format_order_message(order):
     message += f"📊 *Общее количество товаров:* {total_amount} шт.\n"
     message += f"🆔 *ID заказа:* {order_id}"
 
-    valid_image_urls = [item['image_url'] for item in items_info if item['image_url']]
     return message, valid_image_urls, items_info
 
 
 async def send_telegram_notification(chat_id, message_text, image_urls=None):
     """Отправляет уведомление в Telegram с группировкой изображений"""
     try:
-        if image_urls and len(image_urls) > 0:
-            if len(image_urls) == 1:
-                await bot.send_photo(chat_id, photo=image_urls[0], caption=message_text, parse_mode='Markdown')
+        # Устраняем None и пустые строки из списка урлов
+        valid_urls = []
+        if image_urls:
+            for url in image_urls:
+                if url and isinstance(url, str) and url.strip():
+                    valid_urls.append(url)
+
+        logger.info(f"Отправка сообщения с {len(valid_urls)} изображениями")
+
+        if valid_urls:
+            # Ограничиваем количество изображений до 10 (максимум для медиагруппы)
+            valid_urls = valid_urls[:10]
+
+            if len(valid_urls) == 1:
+                logger.info(f"Отправка одиночного изображения: {valid_urls[0]}")
+                await bot.send_photo(chat_id, photo=valid_urls[0], caption=message_text, parse_mode='Markdown')
             else:
-                media_group = [InputMediaPhoto(media=image_urls[0], caption=message_text, parse_mode='Markdown')]
-                for url in image_urls[1:]:
-                    if url:
-                        media_group.append(InputMediaPhoto(media=url))
-                await bot.send_media_group(chat_id=chat_id, media=media_group)
+                logger.info(f"Отправка медиагруппы из {len(valid_urls)} изображений")
+                # Создаем медиагруппу
+                media_group = [InputMediaPhoto(media=valid_urls[0], caption=message_text, parse_mode='Markdown')]
+                for url in valid_urls[1:]:
+                    media_group.append(InputMediaPhoto(media=url))
+
+                try:
+                    await bot.send_media_group(chat_id=chat_id, media=media_group)
+                except Exception as media_error:
+                    logger.error(f"Ошибка при отправке медиагруппы: {media_error}")
+                    # В случае ошибки отправляем сначала текст
+                    await bot.send_message(chat_id, text=message_text, parse_mode='Markdown')
+                    # Затем отправляем изображения по одному с задержкой
+                    for url in valid_urls:
+                        try:
+                            await asyncio.sleep(1)
+                            await bot.send_photo(chat_id, photo=url)
+                        except Exception:
+                            logger.error(f"Не удалось отправить изображение {url}")
         else:
             await bot.send_message(chat_id, text=message_text, parse_mode='Markdown')
+
         return True
     except Exception as e:
         logger.error(f"Ошибка при отправке уведомления в Telegram: {e}")
         try:
-            await bot.send_message(chat_id, text=f"{message_text}\n\n⚠️ Не удалось загрузить изображения",
-                                   parse_mode='Markdown')
+            # Пробуем отправить без форматирования в случае ошибки
+            await bot.send_message(chat_id,
+                                   text=f"{message_text.replace('*', '')}\n\n⚠️ Не удалось загрузить изображения")
             return True
         except Exception as text_error:
             logger.error(f"Ошибка при отправке текстового сообщения: {text_error}")
@@ -150,27 +196,47 @@ async def start_command(message: types.Message):
 @dp.message(Command("check"))
 async def check_new_orders_command(message: types.Message):
     """Обработчик команды /check"""
+    await message.answer("Начинаю проверку заказов...")
+
     orders_data = get_orders(API_KEY)
     if not orders_data:
-        await message.answer("Не удалось получить данные о заказах")
+        await message.answer("❌ Не удалось получить данные о заказах")
         return
 
     orders = orders_data.get('payload', {}).get('orders', [])
     if not orders:
-        await message.answer("Нет новых заказов для обработки")
+        await message.answer("📭 Нет новых заказов для обработки")
         return
 
+    await message.answer(f"📋 Найдено {len(orders)} заказов. Начинаю отправку...")
+
     for order in orders:
+        order_id = order.get('id')
         message_text, image_urls, items_info = format_order_message(order)
-        success = await send_telegram_notification(message.chat.id, message_text, image_urls)
-        if success:
-            await message.answer(f"✅ Уведомление о заказе {order.get('id')} успешно отправлено")
-        else:
-            await message.answer(f"❌ Не удалось отправить уведомление о заказе {order.get('id')}")
+
+        await message.answer(f"📤 Отправка заказа #{order_id} с {len(image_urls)} изображениями...")
+
+        try:
+            # Отправляем уведомление
+            success = await send_telegram_notification(message.chat.id, message_text, image_urls)
+
+            if success:
+                await message.answer(f"✅ Заказ #{order_id} успешно отправлен")
+            else:
+                await message.answer(f"⚠️ Проблемы при отправке заказа #{order_id}")
+
+            # Добавляем задержку между отправками заказов
+            await asyncio.sleep(3)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке заказа #{order_id}: {e}")
+            await message.answer(f"❌ Ошибка при отправке заказа #{order_id}: {str(e)[:100]}...")
+            await asyncio.sleep(5)  # Увеличенная задержка при ошибке
+
+    await message.answer("✅ Проверка заказов завершена")
 
 
 async def periodic_check():
-    """Периодическая проверка заказов"""
+    """Периодическая проверка заказов с защитой от флуд контроля"""
     global CHAT_ID, PRODUCT_IDS
     if CHAT_ID is None:
         logger.warning("CHAT_ID не установлен, пропускаю автоматическую проверку.")
@@ -184,39 +250,52 @@ async def periodic_check():
 
     orders = orders_data.get('payload', {}).get('orders', [])
     if not orders:
+        logger.info("Новых заказов не найдено")
         return
 
+    logger.info(f"Получено {len(orders)} заказов")
+
+    # Обработка каждого заказа отдельно
     for order in orders:
+        order_id = order.get('id')
+        logger.info(f"Обработка заказа #{order_id}")
+
+        # Получаем информацию о заказе - текст сообщения и URL изображений
         message_text, image_urls, items_info = format_order_message(order)
 
-        # Проверяем, были ли уже отправлены уведомления для каждой позиции заказа
-        new_items = []
-        for idx, item in enumerate(items_info):
-            # Формируем уникальный ключ для каждого товара:
-            unique_key = f"{order.get('id')}_{item.get('skuCharValue', idx)}"
-            if unique_key not in PRODUCT_IDS:  # Если товар новый
-                new_items.append(item)
-                PRODUCT_IDS.add(unique_key)  # Добавляем его в список отправленных уведомлений
+        # Проверяем на новые товары
+        new_order = False
+        for item in items_info:
+            # Формируем уникальный ключ для каждого товара
+            sku = item.get('skuCharValue', '')
+            unique_key = f"{order_id}_{sku}"
 
-        if new_items:
-            # Формируем новое сообщение только для новых товаров
-            new_message = f"📦 *Новый заказ №{order.get('id')}*\n\n"
-            for num, item in enumerate(new_items, 1):
-                new_message += f"{num}. *{item['title']}*\n   Количество: {item['amount']} шт.\n"
-            new_message += f"\n🚚 *Доставка до:* {datetime.now().strftime('%d.%m.%Y')}\n"
-            new_message += f"📊 *Общее количество товаров:* {len(new_items)} шт.\n"
-            new_message += f"🆔 *ID заказа:* {order.get('id')}"
+            if unique_key not in PRODUCT_IDS:
+                # Нашли новый товар
+                new_order = True
+                PRODUCT_IDS.add(unique_key)
+                logger.info(f"Новый товар: {item['title']} (SKU: {sku})")
 
-            # Отправляем уведомление с обработкой ограничения скорости
-            valid_image_urls = [item['image_url'] for item in new_items if item['image_url']]
+        # Если заказ новый, отправляем уведомление
+        if new_order:
+            logger.info(f"Отправка уведомления о заказе #{order_id} с {len(image_urls)} изображениями")
+
             try:
-                await send_telegram_notification(CHAT_ID, new_message, valid_image_urls)
-            except FloodWait as e:
-                logger.warning(f"Flood limit reached: sleeping for {e.timeout} seconds")
-                await asyncio.sleep(e.timeout)
-                await send_telegram_notification(CHAT_ID, new_message, valid_image_urls)
-            # Небольшая пауза между отправками, чтобы избежать контроля потока
-            await asyncio.sleep(1)
+                # Попытка отправить уведомление
+                await send_telegram_notification(CHAT_ID, message_text, image_urls)
+                logger.info(f"Успешно отправлено уведомление о заказе #{order_id}")
+            except Exception as e:
+                logger.error(f"Ошибка при отправке заказа #{order_id}: {e}")
+
+            # Задержка между отправками разных заказов
+            await asyncio.sleep(3)  # 3 секунды между заказами для избежания флуд контроля
+
+
+# Чтобы не забыть добавить нужные импорты
+# from aiogram.types import InputMediaPhoto
+# import asyncio
+# Увеличиваем задержку в случае ошибки
+
 
 
 async def clear_product_ids():

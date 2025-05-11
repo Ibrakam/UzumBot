@@ -24,7 +24,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Глобальная переменная для хранения chat_id
-#CHAT_ID = -1002476227518
+# CHAT_ID = -1002476227518
 CHAT_ID = None
 
 
@@ -41,6 +41,7 @@ def get_orders(api_key):
     except requests.exceptions.RequestException as e:
         logger.error(f"Ошибка при запросе к API: {e}")
         return None
+
 
 
 def format_order_message(order):
@@ -99,7 +100,8 @@ def format_order_message(order):
             except (KeyError, TypeError) as e:
                 logger.error(f"Ошибка при обработке productImage: {e}")
 
-        items_info.append({'title': product_title, 'amount': amount, 'image_url': image_url})
+        items_info.append(
+            {'title': product_title, 'amount': amount, 'image_url': image_url, 'skuCharValue': sku_char_value})
 
     message = f"📦 *Новый заказ №{order_id}*\n\n"
     for idx, item in enumerate(items_info, 1):
@@ -146,6 +148,7 @@ async def start_command(message: types.Message):
     await message.answer(
         "Бот запущен! Теперь я буду отправлять уведомления сюда.")
 
+
 @dp.message(Command("check"))
 async def check_new_orders_command(message: types.Message):
     """Обработчик команды /check"""
@@ -166,6 +169,7 @@ async def check_new_orders_command(message: types.Message):
             await message.answer(f"✅ Уведомление о заказе {order.get('id')} успешно отправлено")
         else:
             await message.answer(f"❌ Не удалось отправить уведомление о заказе {order.get('id')}")
+
 
 async def periodic_check():
     """Периодическая проверка заказов"""
@@ -208,6 +212,7 @@ async def periodic_check():
             # Отправляем уведомление
             valid_image_urls = [item['image_url'] for item in new_items if item['image_url']]
             await send_telegram_notification(CHAT_ID, new_message, valid_image_urls)
+
 
 async def clear_product_ids():
     """Очищает список ID продуктов каждые 48 часов"""
