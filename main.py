@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Константы
 API_KEY = "mmldJYh2h33pboUakTFsohCOa1VLR5KCP4OBW0j5+y0="
-TOKEN = '7679981523:AAGF18FAUE5not4VIxR-e5gKOgwvYkK102Y'
+TOKEN = '7679981523:AAH4dRq6FRWea24l9jd6ZB4ZpK48eQXuV64'
 CHECK_INTERVAL = 60
 PRODUCT_IDS = set()
 
