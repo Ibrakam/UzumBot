@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import requests
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
@@ -10,6 +10,13 @@ from aiogram.types import InputMediaPhoto
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
+from sqlalchemy import create_engine, Column, String, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+
+engine = create_engine('sqlite:///orders.db')
+Base = declarative_base()
+Session = sessionmaker(bind=engine)
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,13 +25,45 @@ logger = logging.getLogger(__name__)
 API_KEY = "mmldJYh2h33pboUakTFsohCOa1VLR5KCP4OBW0j5+y0="
 TOKEN = '7679981523:AAH4dRq6FRWea24l9jd6ZB4ZpK48eQXuV64'
 CHECK_INTERVAL = 60
-PRODUCT_IDS = set()
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # Глобальная переменная для хранения chat_id
 CHAT_ID = None
+
+
+class SentOrder(Base):
+    __tablename__ = 'sent_orders'
+    order_key = Column(String, primary_key=True)
+    sent_time = Column(DateTime, default=datetime.utcnow)
+
+
+Base.metadata.create_all(engine)
+
+
+def is_order_sent(order_key):
+    session = Session()
+    exists = session.query(SentOrder).filter_by(order_key=order_key).first() is not None
+    logger.info(f"Заказ {order_key} уже был отправлен: {exists}")
+    session.close()
+    return exists
+
+
+def save_order_key(order_key):
+    session = Session()
+    if not session.query(SentOrder).filter_by(order_key=order_key).first():
+        session.add(SentOrder(order_key=order_key))
+        session.commit()
+    session.close()
+
+
+def cleanup_old_orders_sqlalchemy():
+    session = Session()
+    threshold = datetime.utcnow() - timedelta(days=3)
+    session.query(SentOrder).filter(SentOrder.sent_time <= threshold).delete()
+    session.commit()
+    session.close()
 
 
 def get_orders(api_key):
@@ -189,6 +228,8 @@ async def start_command(message: types.Message):
     """Обработчик команды /start для установки chat_id"""
     global CHAT_ID
     CHAT_ID = message.chat.id
+    logger.info(
+        f"Chat ID установлен: {CHAT_ID}, пользователь: {message.from_user.username}, название: {message.chat.title}")
     await message.answer(
         "Бот запущен! Теперь я буду отправлять уведомления сюда.")
 
@@ -237,7 +278,7 @@ async def check_new_orders_command(message: types.Message):
 
 async def periodic_check():
     """Периодическая проверка заказов с защитой от флуд контроля"""
-    global CHAT_ID, PRODUCT_IDS
+    global CHAT_ID
     if CHAT_ID is None:
         logger.warning("CHAT_ID не установлен, пропускаю автоматическую проверку.")
         return
@@ -268,12 +309,12 @@ async def periodic_check():
         for item in items_info:
             # Формируем уникальный ключ для каждого товара
             sku = item.get('skuCharValue', '')
-            unique_key = f"{order_id}_{sku}"
+            unique_key = f"{order_id}"
 
-            if unique_key not in PRODUCT_IDS:
+            if not is_order_sent(unique_key):
                 # Нашли новый товар
                 new_order = True
-                PRODUCT_IDS.add(unique_key)
+                save_order_key(unique_key)
                 logger.info(f"Новый товар: {item['title']} (SKU: {sku})")
 
         # Если заказ новый, отправляем уведомление
@@ -297,21 +338,12 @@ async def periodic_check():
 # Увеличиваем задержку в случае ошибки
 
 
-
-async def clear_product_ids():
-    """Очищает список ID продуктов каждые 48 часов"""
-    global PRODUCT_IDS
-    logger.info("Очистка списка ID продуктов...")
-    PRODUCT_IDS.clear()
-
-
 @dp.message(Command("report"))
 async def manual_daily_report(message: types.Message):
     """Обработчик команды /report для ручного получения ежедневного отчета"""
     logger.info("Получена команда /report для ручного отчета.")
     await daily_report()
     # await message.answer("✅ Ежедневный отчет успешно отправлен!")
-
 
 
 async def daily_report():
@@ -489,9 +521,9 @@ async def main():
         seconds=CHECK_INTERVAL
     )
     scheduler.add_job(
-        clear_product_ids,
+        cleanup_old_orders_sqlalchemy,
         "interval",
-        hours=48  # Очистка каждые 48 часов
+        hours=24
     )
     scheduler.add_job(
         daily_report,
