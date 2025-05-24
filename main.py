@@ -60,7 +60,7 @@ def save_order_key(order_key):
 
 def cleanup_old_orders_sqlalchemy():
     session = Session()
-    threshold = datetime.utcnow() - timedelta(days=3)
+    threshold = datetime.utcnow() - timedelta(days=7)
     session.query(SentOrder).filter(SentOrder.sent_time <= threshold).delete()
     session.commit()
     session.close()
